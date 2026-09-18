@@ -23,6 +23,19 @@
 
 ---
 
+## ⚠️ Troubleshooting & Driver Repair (If Nothing Works)
+
+> [!TIP]
+> **iPhone not detected, AirTraffic sync hangs, or operation fails?**  
+> Corrupted or conflicting Apple USB drivers on Windows are the #1 root cause.
+> 1. Download and install **[3uTools](https://www.3u.com/)**.
+> 2. **Disconnect your iPhone** from your PC.
+> 3. In 3uTools, go to **Toolbox ➔ Repair Driver**.
+> 4. Click **Repair Now** and wait for the Apple driver reinstallation to finish.
+> 5. Reconnect your unlocked iPhone, tap **Trust**, and launch **AirCard**.
+
+---
+
 ## Installation
 
 ### Pre-built Executable
@@ -58,19 +71,6 @@
 > [!IMPORTANT]
 > **Turn OFF Bold Text:**  
 > On your iPhone, go to **Settings ➔ Display & Brightness** and make sure **Bold Text** is turned **OFF**. If Bold Text is enabled, iOS ignores cached dialer button graphics and renders system vector fonts instead.
-
----
-
-## Troubleshooting / Решение проблем
-
-> [!TIP]
-> **Если устройство не отвечает или зависает AirTraffic (ничего не работает):**  
-> Часто Apple Mobile Device драйверы или службы iTunes повреждаются в Windows.
-> 1. Скачайте и установите **[3uTools](https://www.3u.com/)**.
-> 2. **Отключите iPhone** от компьютера.
-> 3. В 3uTools перейдите в **Toolbox ➔ Repair Driver** (Инструменты ➔ Восстановить драйвер).
-> 4. Нажмите **Repair Now (Восстановить сейчас)** и дождитесь окончания переустановки драйверов Apple.
-> 5. Снова подключите разблокированный iPhone и запустите AirCard.
 
 ---
 
