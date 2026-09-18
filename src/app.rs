@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -81,6 +81,7 @@ pub struct AirCardApp {
     theme_path: Option<PathBuf>,
     loaded_theme: Option<PasscodeTheme>,
     forced_telephony_ver: String,
+    keypad_language: String,
     keypad_textures: Vec<(String, egui::TextureHandle)>,
 
     // Worker thread & progress
@@ -123,6 +124,7 @@ impl AirCardApp {
             theme_path: None,
             loaded_theme: None,
             forced_telephony_ver: "Auto (TelephonyUI-10)".to_string(),
+            keypad_language: "Russian (Русский)".to_string(),
             keypad_textures: Vec::new(),
 
             is_busy: false,
@@ -135,7 +137,7 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.2.0 initialized");
+        app.add_log("AirCard Windows v1.2.1 initialized");
         app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
@@ -361,14 +363,19 @@ impl AirCardApp {
             return;
         };
 
+        self.load_theme_from_path(ctx, &path);
+    }
+
+    fn load_theme_from_path(&mut self, ctx: &egui::Context, path: &Path) {
         self.add_log(format!("Opening passcode theme package: {}", path.display()));
         let target_ver = match self.forced_telephony_ver.as_str() {
+            "TelephonyUI-10" => Some("TelephonyUI-10"),
             "TelephonyUI-9" => Some("TelephonyUI-9"),
             "TelephonyUI-8" => Some("TelephonyUI-8"),
-            _ => None,
+            _ => Some("TelephonyUI-10"),
         };
 
-        match parse_passthm_file(&path, target_ver) {
+        match parse_passthm_file(path, target_ver, &self.keypad_language) {
             Ok(theme) => {
                 self.keypad_textures.clear();
                 for (digit, bytes) in &theme.key_previews {
@@ -389,18 +396,20 @@ impl AirCardApp {
                 self.keypad_textures.sort_by(|a, b| a.0.cmp(&b.0));
 
                 self.add_log(format!(
-                    "Passcode theme loaded: '{}' (telephony version: {}, {} button asset pairs)",
+                    "Passcode theme loaded: '{}' (telephony: {}, lang: {}, {} button asset pairs)",
                     theme.name,
                     theme.detected_version,
+                    self.keypad_language,
                     theme.items.len()
                 ));
                 self.status_msg = format!(
-                    "Loaded '{}' with {} assets (target: {})",
+                    "Loaded '{}' with {} assets (target: {}, lang: {})",
                     theme.name,
                     theme.items.len(),
-                    theme.detected_version
+                    theme.detected_version,
+                    self.keypad_language
                 );
-                self.theme_path = Some(path);
+                self.theme_path = Some(path.to_path_buf());
                 self.loaded_theme = Some(theme);
             }
             Err(err) => {
@@ -687,7 +696,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.2.0")
+                        egui::RichText::new("v1.2.1")
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
@@ -1038,15 +1047,45 @@ impl AirCardApp {
                 ui.label(egui::RichText::new("Select cache format based on connected iOS version").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 let combo_w = (ui.available_width() - 4.0).max(150.0);
+                let mut ver_changed = false;
                 egui::ComboBox::from_id_salt("telephony_combo")
                     .width(combo_w)
                     .selected_text(&self.forced_telephony_ver)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.forced_telephony_ver, "Auto (TelephonyUI-10)".into(), "Auto (TelephonyUI-10)");
-                        ui.selectable_value(&mut self.forced_telephony_ver, "TelephonyUI-10".into(), "TelephonyUI-10 (iOS 18+)");
-                        ui.selectable_value(&mut self.forced_telephony_ver, "TelephonyUI-9".into(), "TelephonyUI-9 (iOS 16-17)");
-                        ui.selectable_value(&mut self.forced_telephony_ver, "TelephonyUI-8".into(), "TelephonyUI-8 (Legacy)");
+                        ver_changed |= ui.selectable_value(&mut self.forced_telephony_ver, "Auto (TelephonyUI-10)".into(), "Auto (TelephonyUI-10)").clicked();
+                        ver_changed |= ui.selectable_value(&mut self.forced_telephony_ver, "TelephonyUI-10".into(), "TelephonyUI-10 (iOS 18+)").clicked();
+                        ver_changed |= ui.selectable_value(&mut self.forced_telephony_ver, "TelephonyUI-9".into(), "TelephonyUI-9 (iOS 16-17)").clicked();
+                        ver_changed |= ui.selectable_value(&mut self.forced_telephony_ver, "TelephonyUI-8".into(), "TelephonyUI-8 (Legacy)").clicked();
                     });
+
+                if ver_changed {
+                    if let Some(path) = self.theme_path.clone() {
+                        self.load_theme_from_path(ctx, &path);
+                    }
+                }
+
+                ui.add_space(16.0);
+
+                // Keypad Language
+                ui.label(egui::RichText::new("Keypad Language").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new("Subtext alphabet layout (Russian Cyrillic, English, Ukrainian, or Universal)").size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.add_space(4.0);
+                let mut lang_changed = false;
+                egui::ComboBox::from_id_salt("keypad_lang_combo")
+                    .width(combo_w)
+                    .selected_text(&self.keypad_language)
+                    .show_ui(ui, |ui| {
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Russian (Русский)".into(), "Russian (Русский)").clicked();
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "English".into(), "English").clicked();
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Ukrainian (Українська)".into(), "Ukrainian (Українська)").clicked();
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "All Languages (Universal)".into(), "All Languages (Universal)").clicked();
+                    });
+
+                if lang_changed {
+                    if let Some(path) = self.theme_path.clone() {
+                        self.load_theme_from_path(ctx, &path);
+                    }
+                }
 
                 ui.add_space(16.0);
 

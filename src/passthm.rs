@@ -8,7 +8,7 @@ use regex::Regex;
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-pub const KEYPAD_SUBTEXTS: &[(&str, &str)] = &[
+pub const KEYPAD_SUBTEXTS_EN: &[(&str, &str)] = &[
     ("0", "+"),
     ("1", ""),
     ("2", "A B C"),
@@ -19,6 +19,32 @@ pub const KEYPAD_SUBTEXTS: &[(&str, &str)] = &[
     ("7", "P Q R S"),
     ("8", "T U V"),
     ("9", "W X Y Z"),
+];
+
+pub const KEYPAD_SUBTEXTS_RU: &[(&str, &str)] = &[
+    ("0", "+"),
+    ("1", ""),
+    ("2", "А Б В Г"),
+    ("3", "Д Е Ж З"),
+    ("4", "И Й К Л"),
+    ("5", "М Н О П"),
+    ("6", "Р С Т У"),
+    ("7", "Ф Х Ц Ч"),
+    ("8", "Ш Щ Ъ Ы"),
+    ("9", "Ь Э Ю Я"),
+];
+
+pub const KEYPAD_SUBTEXTS_UK: &[(&str, &str)] = &[
+    ("0", "+"),
+    ("1", ""),
+    ("2", "А Б В Г Ґ"),
+    ("3", "Д Е Є Ж З"),
+    ("4", "И І Ї Й"),
+    ("5", "К Л М Н"),
+    ("6", "О П Р С"),
+    ("7", "Т У Ф Х"),
+    ("8", "Ц Ч Ш Щ"),
+    ("9", "Ь Ю Я"),
 ];
 
 #[derive(Debug, Clone)]
@@ -32,6 +58,7 @@ pub struct PasscodeTheme {
 pub fn parse_passthm_file(
     file_path: &Path,
     forced_version: Option<&str>,
+    language: &str,
 ) -> Result<PasscodeTheme> {
     let file = File::open(file_path).context("Failed to open passcode theme file")?;
     let mut zip = ZipArchive::new(file).context("Failed to read theme file as zip archive")?;
@@ -81,7 +108,14 @@ pub fn parse_passthm_file(
     let simple_digit_re = Regex::new(r"([0-9*#])").unwrap();
     let white_strip_re = Regex::new(r"(?i)--?white$").unwrap();
 
-    let subtext_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS.iter().copied().collect();
+    let ru_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_RU.iter().copied().collect();
+    let en_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_EN.iter().copied().collect();
+    let uk_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_UK.iter().copied().collect();
+
+    let is_ru = language.contains("Russian") || language.contains("ru");
+    let is_uk = language.contains("Ukrainian") || language.contains("uk");
+    let is_en = language.contains("English") || language.contains("en");
+    let is_all = language.contains("All") || language.contains("Universal");
 
     for entry_name in image_entries {
         let leaf = Path::new(&entry_name)
@@ -131,26 +165,51 @@ pub fn parse_passthm_file(
                 key_previews.insert(d.clone(), data.clone());
             }
 
+            let ru_sub = ru_map.get(d.as_str()).copied().unwrap_or("");
+            let en_sub = en_map.get(d.as_str()).copied().unwrap_or("");
+            let uk_sub = uk_map.get(d.as_str()).copied().unwrap_or("");
+
+            let mut add_variant = |prefix: &str, sub: &str| {
+                if sub.is_empty() {
+                    items_dict.insert(format!("{}-{}---white.png", prefix, d), data.clone());
+                } else {
+                    items_dict.insert(format!("{}-{}-{}--white.png", prefix, d, sub), data.clone());
+                    let nospace = sub.replace(' ', "");
+                    if nospace != sub {
+                        items_dict.insert(format!("{}-{}-{}--white.png", prefix, d, nospace), data.clone());
+                    }
+                }
+            };
+
+            if is_ru || is_all {
+                for p in &["ru", "other", "en"] {
+                    add_variant(p, "");
+                    if !ru_sub.is_empty() { add_variant(p, ru_sub); }
+                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                }
+            }
+
+            if is_uk || is_all {
+                for p in &["uk", "other", "en"] {
+                    add_variant(p, "");
+                    if !uk_sub.is_empty() { add_variant(p, uk_sub); }
+                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                }
+            }
+
+            if is_en && !is_all && !is_ru && !is_uk {
+                for p in &["en", "other"] {
+                    add_variant(p, "");
+                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                }
+            }
+
             if let Some(ref s) = subtext {
                 if !s.is_empty() {
-                    items_dict.insert(format!("en-{}-{}--white.png", d, s), data.clone());
-                    items_dict.insert(format!("other-{}-{}--white.png", d, s), data.clone());
+                    for p in &["en", "other", "ru", "uk"] {
+                        add_variant(p, s);
+                    }
                 }
-            }
-            items_dict.insert(format!("en-{}---white.png", d), data.clone());
-            items_dict.insert(format!("other-{}---white.png", d), data.clone());
-
-            if let Some(&std_sub) = subtext_map.get(d.as_str()) {
-                if !std_sub.is_empty() {
-                    items_dict.insert(format!("en-{}-{}--white.png", d, std_sub), data.clone());
-                    items_dict.insert(format!("other-{}-{}--white.png", d, std_sub), data.clone());
-                }
-            }
-
-            if leaf.starts_with("en-") {
-                items_dict.insert(format!("other{}", &leaf[2..]), data.clone());
-            } else if leaf.starts_with("other-") {
-                items_dict.insert(format!("en{}", &leaf[5..]), data.clone());
             }
         }
     }
@@ -159,10 +218,7 @@ pub fn parse_passthm_file(
         bail!("No valid keypad image assets found in passcode theme archive");
     }
 
-    let mut target_dirs = vec![format!("/var/mobile/Library/Caches/{}", primary_target_version)];
-    if forced_version.is_none() && detected_version != primary_target_version {
-        target_dirs.push(format!("/var/mobile/Library/Caches/{}", detected_version));
-    }
+    let target_dirs = vec![format!("/var/mobile/Library/Caches/{}", primary_target_version)];
 
     let mut items = Vec::new();
     for tdir in &target_dirs {
@@ -225,14 +281,15 @@ mod tests {
             zip.finish().unwrap();
         }
 
-        let theme = parse_passthm_file(&test_path, None).expect("failed to parse synthetic theme");
+        let theme = parse_passthm_file(&test_path, None, "Russian (Русский)").expect("failed to parse synthetic theme");
         assert_eq!(theme.name, "test_synthetic");
         assert_eq!(theme.detected_version, "TelephonyUI-10");
         assert!(theme.key_previews.contains_key("0"));
         assert!(theme.key_previews.contains_key("2"));
 
         let leaf_names: Vec<&str> = theme.items.iter().map(|(_, leaf, _)| leaf.as_str()).collect();
-        assert!(leaf_names.contains(&"en-0---white.png"));
+        assert!(leaf_names.contains(&"ru-0---white.png"));
+        assert!(leaf_names.contains(&"ru-2-А Б В Г--white.png"));
         assert!(leaf_names.contains(&"en-2-A B C--white.png"));
 
         let _ = std::fs::remove_file(test_path);
