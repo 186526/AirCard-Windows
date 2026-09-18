@@ -102,7 +102,7 @@ where
         }
 
         log(&format!("Synchronizing {} with AirTraffic host daemon...", leaf_name));
-        sync_assets_via_airtraffic(udid, &assets_to_sync)
+        sync_assets_via_airtraffic(udid, &assets_to_sync, &mut log)
             .context("AirTraffic sync failed")?;
 
         Ok(())

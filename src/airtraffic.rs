@@ -33,7 +33,15 @@ fn generate_uuid_v4() -> String {
     )
 }
 
-pub fn sync_assets_via_airtraffic(udid: &str, assets: &[(&str, &str)]) -> Result<()> {
+pub enum SyncEvent {
+    Log(String),
+    Done(Result<()>),
+}
+
+pub fn sync_assets_via_airtraffic<L>(udid: &str, assets: &[(&str, &str)], mut log: L) -> Result<()>
+where
+    L: FnMut(&str),
+{
     let udid_owned = udid.to_string();
     let assets_owned: Vec<(String, String)> = assets
         .iter()
@@ -46,19 +54,35 @@ pub fn sync_assets_via_airtraffic(udid: &str, assets: &[(&str, &str)]) -> Result
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
-        let res = sync_assets_via_airtraffic_internal(&udid_owned, &refs);
-        let _ = tx.send(res);
+        let tx_log = tx.clone();
+        let res = sync_assets_via_airtraffic_internal(&udid_owned, &refs, move |msg| {
+            let _ = tx_log.send(SyncEvent::Log(msg.to_string()));
+        });
+        let _ = tx.send(SyncEvent::Done(res));
     });
 
-    match rx.recv_timeout(Duration::from_secs(35)) {
-        Ok(res) => res,
-        Err(_) => {
-            bail!("AirTraffic sync timed out (35s). Ensure iPhone is unlocked, open Apple Books app once, and retry.");
+    let start = std::time::Instant::now();
+    loop {
+        let elapsed = start.elapsed();
+        if elapsed >= Duration::from_secs(35) {
+            bail!("AirTraffic sync timed out (35s). 1) Разблокируйте экран iPhone и держите включенным. 2) Откройте приложение «Книги» (Apple Books) на iPhone один раз. 3) Закройте iTunes на ПК.");
+        }
+        let timeout = Duration::from_secs(35) - elapsed;
+        match rx.recv_timeout(timeout) {
+            Ok(SyncEvent::Log(msg)) => log(&msg),
+            Ok(SyncEvent::Done(res)) => return res,
+            Err(_) => {
+                bail!("AirTraffic sync timed out (35s). 1) Разблокируйте экран iPhone и держите включенным. 2) Откройте приложение «Книги» (Apple Books) на iPhone один раз. 3) Закройте iTunes на ПК.");
+            }
         }
     }
 }
 
-fn sync_assets_via_airtraffic_internal(udid: &str, assets: &[(&str, &str)]) -> Result<()> {
+fn sync_assets_via_airtraffic_internal<L>(udid: &str, assets: &[(&str, &str)], mut log: L) -> Result<()>
+where
+    L: FnMut(&str),
+{
+    log("Connecting to iOS AirTraffic service (com.apple.atc)...");
     let libs = get_apple_libraries()?;
     let cf_udid = libs.create_cf_string(udid)?;
 
@@ -67,7 +91,8 @@ fn sync_assets_via_airtraffic_internal(udid: &str, assets: &[(&str, &str)]) -> R
         bail!("ATHostConnectionCreate failed for UDID: {}", udid);
     }
 
-    let run_sync = || -> Result<()> {
+    let mut run_sync = || -> Result<()> {
+        log("Waiting for SyncAllowed from iPhone (keep screen unlocked)...");
         // 1. Wait for SyncAllowed message
         let mut sync_allowed = false;
         for _ in 0..15 {
@@ -82,12 +107,15 @@ fn sync_assets_via_airtraffic_internal(udid: &str, assets: &[(&str, &str)]) -> R
             if name == "SyncAllowed" {
                 sync_allowed = true;
                 break;
+            } else {
+                log(&format!("AirTraffic message: {}", name));
             }
         }
         if !sync_allowed {
-            bail!("AirTraffic: SyncAllowed message not received from device");
+            bail!("AirTraffic: SyncAllowed message not received. Ensure iPhone screen is unlocked and Books app is opened.");
         }
 
+        log("SyncAllowed received! Handshaking Books sync request...");
         // 2. Send HostInfo
         let mut host_info_dict = HashMap::new();
         host_info_dict.insert("Type".to_string(), plist::Value::String("iTunes".to_string()));
@@ -126,6 +154,7 @@ fn sync_assets_via_airtraffic_internal(udid: &str, assets: &[(&str, &str)]) -> R
             );
         }
 
+        log("Waiting for ReadyForSync from iPhone...");
         // 4. Wait for ReadyForSync
         let mut ready_for_sync = false;
         for _ in 0..20 {

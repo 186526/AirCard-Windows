@@ -347,7 +347,7 @@ impl AirCardApp {
                     )));
                 }
                 Err(e) => {
-                    let _ = tx.send(BackgroundTaskMessage::Done(Err(e.to_string())));
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{:#}", e))));
                 }
             }
         });
@@ -458,7 +458,7 @@ impl AirCardApp {
                     )));
                 }
                 Err(e) => {
-                    let _ = tx.send(BackgroundTaskMessage::Done(Err(e.to_string())));
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{:#}", e))));
                 }
             }
         });
