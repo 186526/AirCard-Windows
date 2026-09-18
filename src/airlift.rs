@@ -315,6 +315,27 @@ pub fn stage_streaming_zip(
             sent += s as usize;
         }
 
+        // Set receive timeout so socket cannot block indefinitely
+        let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(zip_service) };
+        if raw_socket > 0 {
+            #[cfg(windows)]
+            unsafe {
+                unsafe extern "system" {
+                    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
+                }
+                const SOL_SOCKET: i32 = 0xffff;
+                const SO_RCVTIMEO: i32 = 0x1006;
+                let timeout_ms: u32 = 25000;
+                let _ = setsockopt(
+                    raw_socket as usize,
+                    SOL_SOCKET,
+                    SO_RCVTIMEO,
+                    &timeout_ms as *const u32 as *const i8,
+                    std::mem::size_of::<u32>() as i32,
+                );
+            }
+        }
+
         // Receive response
         let mut response: CFTypeRef = ptr::null();
         let mut format: isize = 0;

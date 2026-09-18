@@ -34,6 +34,31 @@ fn generate_uuid_v4() -> String {
 }
 
 pub fn sync_assets_via_airtraffic(udid: &str, assets: &[(&str, &str)]) -> Result<()> {
+    let udid_owned = udid.to_string();
+    let assets_owned: Vec<(String, String)> = assets
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::spawn(move || {
+        let refs: Vec<(&str, &str)> = assets_owned
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let res = sync_assets_via_airtraffic_internal(&udid_owned, &refs);
+        let _ = tx.send(res);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(35)) {
+        Ok(res) => res,
+        Err(_) => {
+            bail!("AirTraffic sync timed out (35s). Ensure iPhone is unlocked, open Apple Books app once, and retry.");
+        }
+    }
+}
+
+fn sync_assets_via_airtraffic_internal(udid: &str, assets: &[(&str, &str)]) -> Result<()> {
     let libs = get_apple_libraries()?;
     let cf_udid = libs.create_cf_string(udid)?;
 

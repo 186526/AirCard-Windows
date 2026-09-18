@@ -3,12 +3,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use std::collections::HashMap;
-
 use crate::afc::AfcClient;
 use crate::airlift::{
     LINK_PREFIX, RECOVERED_PREFIX, SOURCE_PREFIX, build_books_plist,
-    build_streaming_zip_archive_multi, restore_books, snapshot_books,
+    build_streaming_zip_archive, restore_books, snapshot_books,
     stage_streaming_zip,
 };
 use crate::airtraffic::sync_assets_via_airtraffic;
@@ -17,45 +15,12 @@ use crate::device::ActiveDeviceSession;
 pub const TARGET_WALLET_ASSETS: &[&str] = &[
     "cardBackgroundCombined@3x.png",
     "cardBackgroundCombined@2x.png",
-    "cardBackgroundCombined.png",
-    "cardBackgroundCombined1@3x.png",
-    "cardBackgroundCombined1@2x.png",
-    "cardBackgroundCombined1.png",
-    "cardBackground@3x.png",
-    "cardBackground@2x.png",
-    "cardBackground.png",
-    "background@3x.png",
-    "background@2x.png",
-    "background.png",
-    "FrontFace@3x.png",
-    "FrontFace@2x.png",
-    "FrontFace.png",
-    "FrontFace",
-    "Preview@3x.png",
-    "Preview@2x.png",
-    "Preview.png",
-    "Preview",
 ];
 
 pub const CACHE_FILES: &[&str] = &[
     "FrontFace",
-    "FrontFace.png",
-    "FrontFace@2x",
-    "FrontFace@2x.png",
-    "FrontFace@3x",
-    "FrontFace@3x.png",
-    "Preview",
-    "Preview.png",
-    "Preview@2x",
-    "Preview@2x.png",
-    "Preview@3x",
-    "Preview@3x.png",
     "PlaceHolder",
-    "PlaceHolder.png",
-    "PlaceHolder@2x",
-    "PlaceHolder@2x.png",
-    "PlaceHolder@3x",
-    "PlaceHolder@3x.png",
+    "Preview",
 ];
 
 #[link(name = "bcrypt")]
@@ -81,6 +46,83 @@ pub fn generate_token() -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+pub fn write_system_file<L>(
+    udid: &str,
+    target_dir: &str,
+    leaf_name: &str,
+    payload: &[u8],
+    mut log: L,
+) -> Result<()>
+where
+    L: FnMut(&str),
+{
+    let token = generate_token();
+    let source = format!("{}{}", SOURCE_PREFIX, token);
+    let link_dest = format!("{}{}", LINK_PREFIX, token);
+    let recovered = format!("{}{}", RECOVERED_PREFIX, token);
+
+    let link_ident = format!("../../{}/p0/p1/p2/link", source);
+    let payload_ident = format!("../../{}/payload", source);
+    let target_dest = format!("{}/{}", link_dest, leaf_name);
+
+    let books_identifiers = vec![link_ident.clone(), payload_ident.clone()];
+    let assets_to_sync = [
+        (link_ident.as_str(), link_dest.as_str()),
+        (payload_ident.as_str(), target_dest.as_str()),
+    ];
+
+    log(&format!("Connecting AFC for {}...", leaf_name));
+    let session = ActiveDeviceSession::open(Some(udid))
+        .context("Failed to open device session for writing")?;
+    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
+
+    let snapshot = snapshot_books(&afc).context("Failed to snapshot Books state before staging")?;
+
+    let archive_data = build_streaming_zip_archive(target_dir, payload)
+        .context("Failed to build streaming zip archive")?;
+
+    let books_plist = build_books_plist(&books_identifiers)
+        .context("Failed to build Books.plist")?;
+
+    let write_res = (|| -> Result<()> {
+        log(&format!("Staging payload archive ({} bytes) via MobileInstallation...", archive_data.len()));
+        stage_streaming_zip(&session, &source, &archive_data)
+            .context("Failed to stage streaming zip conduit")?;
+
+        let link_obj = format!("{}/p0/p1/p2/link", source);
+        let payload_obj = format!("{}/payload", source);
+        if !afc.exists(&source) || !afc.exists(&link_obj) || !afc.exists(&payload_obj) {
+            bail!("StreamingZip completed but staging link/payload object missing on AFC");
+        }
+
+        afc.make_directory_recursive("Books/Sync")?;
+        afc.write_file("Books/Sync/Books.plist", &books_plist)?;
+        if !afc.exists("Books/Sync/Books.plist") {
+            bail!("Failed to stage Books/Sync/Books.plist");
+        }
+
+        log(&format!("Synchronizing {} with AirTraffic host daemon...", leaf_name));
+        sync_assets_via_airtraffic(udid, &assets_to_sync)
+            .context("AirTraffic sync failed")?;
+
+        Ok(())
+    })();
+
+    let _ = afc.remove_path(&link_dest);
+    let _ = afc.remove_path(&recovered);
+    let _ = afc.remove_tree(&source);
+    sleep(Duration::from_millis(800));
+
+    let restore_res = restore_books(&afc, &snapshot);
+
+    write_res?;
+    restore_res.context("Failed to restore Books state during cleanup")?;
+    log(&format!("Successfully written: {}", leaf_name));
+
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn write_system_files_batch<L>(
     udid: &str,
     target_dir: &str,
@@ -90,110 +132,10 @@ pub fn write_system_files_batch<L>(
 where
     L: FnMut(&str),
 {
-    if items.is_empty() {
-        return Ok(());
+    for (leaf, payload) in items {
+        write_system_file(udid, target_dir, leaf, payload, &mut log)?;
     }
-
-    let token = generate_token();
-    log(&format!("Staging token generated: {}", token));
-    log(&format!("Target directory: {}", target_dir));
-    log(&format!("Preparing batch of {} payload item(s)...", items.len()));
-
-    let source = format!("{}{}", SOURCE_PREFIX, token);
-    let link_dest = format!("{}{}", LINK_PREFIX, token);
-    let recovered = format!("{}{}", RECOVERED_PREFIX, token);
-
-    let link_ident = format!("../../{}/p0/p1/p2/link", source);
-
-    let mut books_identifiers = Vec::with_capacity(items.len() + 1);
-    books_identifiers.push(link_ident.clone());
-
-    let mut assets_to_sync = Vec::with_capacity(items.len() + 1);
-    assets_to_sync.push((link_ident, link_dest.clone()));
-
-    for (idx, (leaf_name, _)) in items.iter().enumerate() {
-        let payload_ident = format!("../../{}/payload_{}", source, idx);
-        let dest = format!("{}/{}", link_dest, leaf_name);
-        books_identifiers.push(payload_ident.clone());
-        assets_to_sync.push((payload_ident, dest));
-    }
-
-    log("Connecting to device AFC (Apple File Conduit)...");
-    let session = ActiveDeviceSession::open(Some(udid))
-        .context("Failed to open device session for writing")?;
-    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
-
-    log("Creating safety snapshot of Books sync state...");
-    let snapshot = snapshot_books(&afc).context("Failed to snapshot Books state before staging")?;
-
-    log("Assembling streaming zip archive with payload...");
-    let archive_data = build_streaming_zip_archive_multi(target_dir, items)
-        .context("Failed to build streaming zip archive")?;
-    log(&format!("Streaming zip archive built: {} bytes", archive_data.len()));
-
-    let books_plist = build_books_plist(&books_identifiers)
-        .context("Failed to build Books.plist")?;
-
-    let write_res = (|| -> Result<()> {
-        log("Staging streaming zip conduit via MobileInstallation...");
-        stage_streaming_zip(&session, &source, &archive_data)
-            .context("Failed to stage streaming zip conduit")?;
-
-        log("Validating staged source objects on AFC filesystem...");
-        let link_obj = format!("{}/p0/p1/p2/link", source);
-        if !afc.exists(&source) || !afc.exists(&link_obj) {
-            bail!("StreamingZip completed but link object is missing on AFC filesystem");
-        }
-        for idx in 0..items.len() {
-            let payload_obj = format!("{}/payload_{}", source, idx);
-            if !afc.exists(&payload_obj) {
-                bail!("StreamingZip payload_{} is missing on AFC filesystem", idx);
-            }
-        }
-
-        log("Writing manifest Books/Sync/Books.plist...");
-        afc.make_directory_recursive("Books/Sync")?;
-        afc.write_file("Books/Sync/Books.plist", &books_plist)?;
-        if !afc.exists("Books/Sync/Books.plist") {
-            bail!("Failed to stage Books/Sync/Books.plist");
-        }
-
-        log(&format!("Initiating AirTraffic sync protocol ({} asset pairs)...", assets_to_sync.len()));
-        let sync_refs: Vec<(&str, &str)> = assets_to_sync
-            .iter()
-            .map(|(id, dst)| (id.as_str(), dst.as_str()))
-            .collect();
-        sync_assets_via_airtraffic(udid, &sync_refs)
-            .context("AirTraffic sync failed")?;
-        log("AirTraffic sync completed successfully.");
-
-        Ok(())
-    })();
-
-    log("Cleaning up temporary conduit staging objects on device...");
-    let _ = afc.remove_path(&link_dest);
-    let _ = afc.remove_path(&recovered);
-    let _ = afc.remove_tree(&source);
-    sleep(Duration::from_millis(1500));
-
-    log("Restoring Books state snapshot...");
-    let restore_res = restore_books(&afc, &snapshot);
-
-    write_res?;
-    restore_res.context("Failed to restore Books state during cleanup")?;
-    log("Batch write operation completed.");
-
     Ok(())
-}
-
-#[allow(dead_code)]
-pub fn write_system_file(
-    udid: &str,
-    target_dir: &str,
-    leaf_name: &str,
-    payload: &[u8],
-) -> Result<()> {
-    write_system_files_batch(udid, target_dir, &[(leaf_name, payload)], |_| {})
 }
 
 pub fn flash_wallet_skin<F, L>(
@@ -212,27 +154,28 @@ where
     log(&format!("Target Card Hash: {}", card_hash));
     log(&format!("Skin payload size: {} bytes PNG", skin_png.len()));
 
-    progress(1, 3, "Writing primary wallet card assets...");
-    log(&format!("[1/3] Writing {} primary card assets to {}...", TARGET_WALLET_ASSETS.len(), pkpass_dir));
-    let assets: Vec<(&str, &[u8])> = TARGET_WALLET_ASSETS
-        .iter()
-        .map(|&name| (name, skin_png))
-        .collect();
-    write_system_files_batch(udid, &pkpass_dir, &assets, &mut log)
-        .context("Failed to write card assets")?;
+    let total_steps = TARGET_WALLET_ASSETS.len() + 2 * CACHE_FILES.len();
+    let mut step = 0;
 
-    let cache_items: Vec<(&str, &[u8])> = CACHE_FILES
-        .iter()
-        .map(|&name| (name, skin_png))
-        .collect();
-
-    for (i, ext) in [".cache", ".pkcache"].iter().enumerate() {
-        let cache_dir = format!("/var/mobile/Library/Passes/Cards/{}{}", card_hash, ext);
-        progress(2 + i, 3, &format!("Updating card cache ({})...", ext));
-        log(&format!("[{}/3] Updating cache in {} ({} files)...", 2 + i, cache_dir, cache_items.len()));
-        let _ = write_system_files_batch(udid, &cache_dir, &cache_items, &mut log);
+    for asset in TARGET_WALLET_ASSETS {
+        step += 1;
+        progress(step, total_steps, &format!("Writing {}...", asset));
+        log(&format!("[{}/{}] Writing primary asset {}...", step, total_steps, asset));
+        write_system_file(udid, &pkpass_dir, asset, skin_png, &mut log)
+            .context(format!("Failed to write card asset {}", asset))?;
     }
 
+    for ext in [".cache", ".pkcache"] {
+        let cache_dir = format!("/var/mobile/Library/Passes/Cards/{}{}", card_hash, ext);
+        for leaf in CACHE_FILES {
+            step += 1;
+            progress(step, total_steps, &format!("Clearing {}/{}...", ext, leaf));
+            log(&format!("[{}/{}] Invaliding cache: {}/{}...", step, total_steps, ext, leaf));
+            let _ = write_system_file(udid, &cache_dir, leaf, b"corrupted", &mut log);
+        }
+    }
+
+    progress(total_steps, total_steps, "Card skin updated successfully!");
     log("Card skin write finished! Close and reopen Wallet on iPhone to view.");
     Ok(())
 }
@@ -247,25 +190,17 @@ where
     F: FnMut(usize, usize, &str),
     L: FnMut(&str),
 {
-    let mut by_dir: HashMap<&str, Vec<(&str, &[u8])>> = HashMap::new();
-    for (target_dir, leaf, payload) in items {
-        by_dir
-            .entry(target_dir.as_str())
-            .or_default()
-            .push((leaf.as_str(), payload.as_slice()));
-    }
-
-    let total_dirs = by_dir.len();
-    log(&format!("Flashing passcode theme across {} target directories...", total_dirs));
-    for (idx, (target_dir, dir_items)) in by_dir.iter().enumerate() {
+    let total = items.len();
+    log(&format!("Flashing passcode theme ({} button assets)...", total));
+    for (idx, (target_dir, leaf, payload)) in items.iter().enumerate() {
         progress(
             idx + 1,
-            total_dirs,
-            &format!("Writing {} button assets to {}...", dir_items.len(), target_dir),
+            total,
+            &format!("Writing {}...", leaf),
         );
-        log(&format!("[{}/{}] Writing {} assets to {}...", idx + 1, total_dirs, dir_items.len(), target_dir));
-        write_system_files_batch(udid, target_dir, dir_items, &mut log)
-            .context(format!("Failed to write passcode buttons to {}", target_dir))?;
+        log(&format!("[{}/{}] Writing button asset {} to {}...", idx + 1, total, leaf, target_dir));
+        write_system_file(udid, target_dir, leaf, payload, &mut log)
+            .context(format!("Failed to write passcode button {}", leaf))?;
     }
 
     log("Passcode theme successfully written! Lock iPhone to see new keypad.");
