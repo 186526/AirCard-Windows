@@ -59,6 +59,7 @@ pub fn parse_passthm_file(
     file_path: &Path,
     forced_version: Option<&str>,
     language: &str,
+    bold: bool,
 ) -> Result<PasscodeTheme> {
     let file = File::open(file_path).context("Failed to open passcode theme file")?;
     let mut zip = ZipArchive::new(file).context("Failed to read theme file as zip archive")?;
@@ -106,7 +107,7 @@ pub fn parse_passthm_file(
 
     let digit_re = Regex::new(r"(?:^[a-zA-Z]+-)?([0-9*#])(?:-([^-\n]+))?").unwrap();
     let simple_digit_re = Regex::new(r"([0-9*#])").unwrap();
-    let white_strip_re = Regex::new(r"(?i)--?white$").unwrap();
+    let white_strip_re = Regex::new(r"(?i)--?white(?:-bold)?$").unwrap();
 
     let ru_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_RU.iter().copied().collect();
     let en_map: HashMap<&str, &str> = KEYPAD_SUBTEXTS_EN.iter().copied().collect();
@@ -114,8 +115,11 @@ pub fn parse_passthm_file(
 
     let is_ru = language.contains("Russian") || language.contains("ru");
     let is_uk = language.contains("Ukrainian") || language.contains("uk");
+    let is_ja = language.contains("Japanese") || language.contains("ja");
     let is_en = language.contains("English") || language.contains("en");
     let is_all = language.contains("All") || language.contains("Universal");
+
+    let bold_suffix = if bold { "-bold" } else { "" };
 
     for entry_name in image_entries {
         let leaf = Path::new(&entry_name)
@@ -131,8 +135,6 @@ pub fn parse_passthm_file(
         let mut entry = zip.by_name(&entry_name)?;
         let mut data = Vec::new();
         entry.read_to_end(&mut data)?;
-
-        items_dict.insert(leaf.clone(), data.clone());
 
         let stem = Path::new(&leaf)
             .file_stem()
@@ -171,42 +173,55 @@ pub fn parse_passthm_file(
 
             let mut add_variant = |prefix: &str, sub: &str| {
                 if sub.is_empty() {
-                    items_dict.insert(format!("{}-{}---white.png", prefix, d), data.clone());
+                    items_dict.insert(format!("{}-{}---white{}.png", prefix, d, bold_suffix), data.clone());
                 } else {
-                    items_dict.insert(format!("{}-{}-{}--white.png", prefix, d, sub), data.clone());
+                    items_dict.insert(format!("{}-{}-{}--white{}.png", prefix, d, sub, bold_suffix), data.clone());
                     let nospace = sub.replace(' ', "");
                     if nospace != sub {
-                        items_dict.insert(format!("{}-{}-{}--white.png", prefix, d, nospace), data.clone());
+                        items_dict.insert(format!("{}-{}-{}--white{}.png", prefix, d, nospace, bold_suffix), data.clone());
                     }
                 }
             };
 
-            if is_ru || is_all {
+            if is_ru {
                 for p in &["ru", "other", "en"] {
                     add_variant(p, "");
                     if !ru_sub.is_empty() { add_variant(p, ru_sub); }
                     if !en_sub.is_empty() { add_variant(p, en_sub); }
                 }
-            }
-
-            if is_uk || is_all {
+            } else if is_uk {
                 for p in &["uk", "other", "en"] {
                     add_variant(p, "");
                     if !uk_sub.is_empty() { add_variant(p, uk_sub); }
                     if !en_sub.is_empty() { add_variant(p, en_sub); }
                 }
-            }
-
-            if is_en && !is_all && !is_ru && !is_uk {
+            } else if is_ja {
+                for p in &["ja", "other", "en"] {
+                    add_variant(p, "");
+                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                }
+            } else if is_en && !is_all {
                 for p in &["en", "other"] {
                     add_variant(p, "");
                     if !en_sub.is_empty() { add_variant(p, en_sub); }
+                }
+            } else if is_all {
+                for p in &["en", "other", "ru", "uk", "ja", "es", "fr", "de", "it", "pt", "tr", "pl", "ko", "zh"] {
+                    add_variant(p, "");
+                    if *p == "ru" && !ru_sub.is_empty() {
+                        add_variant(p, ru_sub);
+                    } else if *p == "uk" && !uk_sub.is_empty() {
+                        add_variant(p, uk_sub);
+                    }
+                    if !en_sub.is_empty() {
+                        add_variant(p, en_sub);
+                    }
                 }
             }
 
             if let Some(ref s) = subtext {
                 if !s.is_empty() {
-                    for p in &["en", "other", "ru", "uk"] {
+                    for p in &["en", "other", "ru", "uk", "ja"] {
                         add_variant(p, s);
                     }
                 }
@@ -222,6 +237,8 @@ pub fn parse_passthm_file(
 
     let mut items = Vec::new();
     for tdir in &target_dirs {
+        // High-DPI cache marker for modern iOS (16, 17, 18+)
+        items.push((tdir.clone(), "_big".to_string(), Vec::new()));
         for (leaf, data) in &items_dict {
             items.push((tdir.clone(), leaf.clone(), data.clone()));
         }
@@ -281,16 +298,24 @@ mod tests {
             zip.finish().unwrap();
         }
 
-        let theme = parse_passthm_file(&test_path, None, "Russian (Русский)").expect("failed to parse synthetic theme");
+        let theme = parse_passthm_file(&test_path, None, "Russian (Русский)", false).expect("failed to parse synthetic theme");
         assert_eq!(theme.name, "test_synthetic");
         assert_eq!(theme.detected_version, "TelephonyUI-10");
         assert!(theme.key_previews.contains_key("0"));
         assert!(theme.key_previews.contains_key("2"));
 
         let leaf_names: Vec<&str> = theme.items.iter().map(|(_, leaf, _)| leaf.as_str()).collect();
+        assert!(leaf_names.contains(&"_big"));
         assert!(leaf_names.contains(&"ru-0---white.png"));
         assert!(leaf_names.contains(&"ru-2-А Б В Г--white.png"));
         assert!(leaf_names.contains(&"en-2-A B C--white.png"));
+
+        // Test bold mode
+        let theme_bold = parse_passthm_file(&test_path, None, "Japanese (日本語)", true).expect("failed to parse synthetic bold theme");
+        let bold_leaves: Vec<&str> = theme_bold.items.iter().map(|(_, leaf, _)| leaf.as_str()).collect();
+        assert!(bold_leaves.contains(&"_big"));
+        assert!(bold_leaves.contains(&"ja-0---white-bold.png"));
+        assert!(bold_leaves.contains(&"ja-2-A B C--white-bold.png"));
 
         let _ = std::fs::remove_file(test_path);
     }

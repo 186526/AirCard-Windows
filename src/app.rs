@@ -82,6 +82,7 @@ pub struct AirCardApp {
     loaded_theme: Option<PasscodeTheme>,
     forced_telephony_ver: String,
     keypad_language: String,
+    passcode_bold: bool,
     keypad_textures: Vec<(String, egui::TextureHandle)>,
 
     // Worker thread & progress
@@ -124,7 +125,8 @@ impl AirCardApp {
             theme_path: None,
             loaded_theme: None,
             forced_telephony_ver: "Auto (TelephonyUI-10)".to_string(),
-            keypad_language: "Russian (Русский)".to_string(),
+            keypad_language: "English".to_string(),
+            passcode_bold: false,
             keypad_textures: Vec::new(),
 
             is_busy: false,
@@ -309,6 +311,7 @@ impl AirCardApp {
         };
 
         let png_bytes = skin.png.clone();
+        let pdf_bytes = skin.pdf.clone();
         if let Some(ref flag) = self.scan_stop_flag {
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -330,6 +333,7 @@ impl AirCardApp {
                 &udid,
                 &hash,
                 &png_bytes,
+                &pdf_bytes,
                 move |step, total, msg| {
                     let _ = tx_progress.send(BackgroundTaskMessage::Progress {
                         step,
@@ -375,7 +379,7 @@ impl AirCardApp {
             _ => Some("TelephonyUI-10"),
         };
 
-        match parse_passthm_file(path, target_ver, &self.keypad_language) {
+        match parse_passthm_file(path, target_ver, &self.keypad_language, self.passcode_bold) {
             Ok(theme) => {
                 self.keypad_textures.clear();
                 for (digit, bytes) in &theme.key_previews {
@@ -396,18 +400,20 @@ impl AirCardApp {
                 self.keypad_textures.sort_by(|a, b| a.0.cmp(&b.0));
 
                 self.add_log(format!(
-                    "Passcode theme loaded: '{}' (telephony: {}, lang: {}, {} button asset pairs)",
+                    "Passcode theme loaded: '{}' (telephony: {}, lang: {}, bold: {}, {} assets)",
                     theme.name,
                     theme.detected_version,
                     self.keypad_language,
+                    self.passcode_bold,
                     theme.items.len()
                 ));
                 self.status_msg = format!(
-                    "Loaded '{}' with {} assets (target: {}, lang: {})",
+                    "Loaded '{}' with {} assets (target: {}, lang: {}, bold: {})",
                     theme.name,
                     theme.items.len(),
                     theme.detected_version,
-                    self.keypad_language
+                    self.keypad_language,
+                    if self.passcode_bold { "ON" } else { "OFF" }
                 );
                 self.theme_path = Some(path.to_path_buf());
                 self.loaded_theme = Some(theme);
@@ -605,7 +611,7 @@ fn setup_custom_theme(ctx: &egui::Context) {
     visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
 
     visuals.selection.bg_fill = md3::PRIMARY_CONTAINER;
-    visuals.selection.stroke = egui::Stroke::NONE;
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, md3::PRIMARY);
 
     ctx.set_visuals(visuals);
 
@@ -696,7 +702,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.2.1")
+                        egui::RichText::new("v1.2.2")
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
@@ -900,18 +906,22 @@ impl AirCardApp {
                     ui.label(egui::RichText::new("Saved cards").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     ui.add_space(2.0);
                     let combo_w = (ui.available_width() - 4.0).max(150.0);
+                    let sel_label = self.saved_cards.iter()
+                        .find(|c| c.hash == self.card_hash)
+                        .map(|c| format!("{} ({})", c.name, &c.hash[..8.min(c.hash.len())]))
+                        .unwrap_or_else(|| "Select...".into());
+
                     egui::ComboBox::from_id_salt("saved_cards_box")
                         .width(combo_w)
-                        .selected_text(
-                            self.saved_cards.iter()
-                                .find(|c| c.hash == self.card_hash)
-                                .map(|c| format!("{} ({})", c.name, &c.hash[..8.min(c.hash.len())]))
-                                .unwrap_or_else(|| "Select...".into()),
-                        )
+                        .selected_text(egui::RichText::new(sel_label).color(md3::ON_SURFACE))
                         .show_ui(ui, |ui| {
                             for card in &self.saved_cards {
+                                let is_selected = self.card_hash == card.hash;
                                 let label = format!("{} ({}...)", card.name, &card.hash[..8.min(card.hash.len())]);
-                                if ui.selectable_label(self.card_hash == card.hash, label).clicked() {
+                                let text = egui::RichText::new(label)
+                                    .color(if is_selected { md3::ON_PRIMARY_CONTAINER } else { md3::ON_SURFACE })
+                                    .strong();
+                                if ui.selectable_label(is_selected, text).clicked() {
                                     self.card_hash = card.hash.clone();
                                 }
                             }
@@ -1068,20 +1078,42 @@ impl AirCardApp {
 
                 // Keypad Language
                 ui.label(egui::RichText::new("Keypad Language").strong().size(12.0).color(md3::ON_SURFACE));
-                ui.label(egui::RichText::new("Subtext alphabet layout (Russian Cyrillic, English, Ukrainian, or Universal)").size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new("Subtext alphabet layout (English, Russian, Ukrainian, Japanese, or Universal)").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 let mut lang_changed = false;
                 egui::ComboBox::from_id_salt("keypad_lang_combo")
                     .width(combo_w)
-                    .selected_text(&self.keypad_language)
+                    .selected_text(egui::RichText::new(&self.keypad_language).color(md3::ON_SURFACE))
                     .show_ui(ui, |ui| {
-                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Russian (Русский)".into(), "Russian (Русский)").clicked();
                         lang_changed |= ui.selectable_value(&mut self.keypad_language, "English".into(), "English").clicked();
-                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Ukrainian (Українська)".into(), "Ukrainian (Українська)").clicked();
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Russian".into(), "Russian").clicked();
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Ukrainian".into(), "Ukrainian").clicked();
+                        lang_changed |= ui.selectable_value(&mut self.keypad_language, "Japanese".into(), "Japanese").clicked();
                         lang_changed |= ui.selectable_value(&mut self.keypad_language, "All Languages (Universal)".into(), "All Languages (Universal)").clicked();
                     });
 
                 if lang_changed {
+                    if let Some(path) = self.theme_path.clone() {
+                        self.load_theme_from_path(ctx, &path);
+                    }
+                }
+
+                ui.add_space(10.0);
+
+                // Bold Font Toggle
+                let mut bold_changed = false;
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut self.passcode_bold, egui::RichText::new("Bold Text (iOS Accessibility)").strong().size(12.0).color(md3::ON_SURFACE)).changed() {
+                        bold_changed = true;
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("Generates *-bold.png for devices with Bold Text turned ON in iPhone Settings -> Display")
+                        .size(11.0)
+                        .color(md3::ON_SURFACE_VARIANT),
+                );
+
+                if bold_changed {
                     if let Some(path) = self.theme_path.clone() {
                         self.load_theme_from_path(ctx, &path);
                     }
@@ -1128,8 +1160,8 @@ impl AirCardApp {
                 ui.label(egui::RichText::new("Dialer button artwork").size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(12.0);
 
-                let pass_w = (ui.available_width() - 8.0).clamp(250.0, 400.0);
-                let pass_h = pass_w * (969.0 / 1536.0);
+                let pass_w = (ui.available_width() - 8.0).clamp(240.0, 360.0);
+                let pass_h = 265.0;
 
                 ui.vertical_centered(|ui| {
                     if self.keypad_textures.is_empty() {
@@ -1145,18 +1177,46 @@ impl AirCardApp {
                         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                             ui.vertical_centered(|ui| {
                                 ui.add_space(10.0);
-                                egui::Grid::new("keypad_grid").spacing([14.0, 8.0]).show(ui, |ui| {
-                                    for (idx, (digit, tex)) in self.keypad_textures.iter().enumerate() {
-                                        ui.vertical_centered(|ui| {
-                                            egui::Frame::new()
-                                                .fill(md3::SURFACE)
-                                                .corner_radius(12).inner_margin(3)
-                                                .show(ui, |ui| { ui.image((tex.id(), egui::vec2(40.0, 40.0))); });
-                                            ui.label(egui::RichText::new(digit).size(9.5).color(md3::ON_SURFACE_VARIANT));
-                                        });
-                                        if (idx + 1) % 3 == 0 { ui.end_row(); }
-                                    }
-                                });
+                                const DIALER_LAYOUT: &[&[&str]] = &[
+                                    &["1", "2", "3"],
+                                    &["4", "5", "6"],
+                                    &["7", "8", "9"],
+                                    &["", "0", ""],
+                                ];
+                                egui::Grid::new("keypad_grid")
+                                    .spacing([18.0, 6.0])
+                                    .show(ui, |ui| {
+                                        for row in DIALER_LAYOUT {
+                                            for &d in *row {
+                                                if d.is_empty() {
+                                                    ui.allocate_exact_size(egui::vec2(44.0, 50.0), egui::Sense::hover());
+                                                } else if let Some((_, tex)) = self.keypad_textures.iter().find(|(k, _)| k == d) {
+                                                    ui.vertical_centered(|ui| {
+                                                        egui::Frame::new()
+                                                            .fill(md3::SURFACE)
+                                                            .corner_radius(12)
+                                                            .inner_margin(3)
+                                                            .show(ui, |ui| { ui.image((tex.id(), egui::vec2(40.0, 40.0))); });
+                                                        ui.label(egui::RichText::new(d).size(9.5).color(md3::ON_SURFACE_VARIANT));
+                                                    });
+                                                } else {
+                                                    ui.vertical_centered(|ui| {
+                                                        egui::Frame::new()
+                                                            .fill(md3::SURFACE)
+                                                            .corner_radius(12)
+                                                            .inner_margin(3)
+                                                            .show(ui, |ui| {
+                                                                let (btn_rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+                                                                ui.painter().rect_filled(btn_rect, 8.0, md3::SURFACE_CONTAINER);
+                                                                ui.painter().text(btn_rect.center(), egui::Align2::CENTER_CENTER, d, egui::FontId::proportional(14.0), md3::ON_SURFACE_VARIANT);
+                                                            });
+                                                        ui.label(egui::RichText::new(d).size(9.5).color(md3::ON_SURFACE_VARIANT));
+                                                    });
+                                                }
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
                             });
                         });
                     }

@@ -125,6 +125,13 @@ pub fn build_streaming_zip_archive_multi(target: &str, items: &[(&str, &[u8])]) 
                 data: payload.to_vec(),
             });
         }
+        if !items.is_empty() {
+            entries.push(StoredZipEntry {
+                name: "payload".to_string(),
+                mode: S_IFREG | 0o600,
+                data: items[0].1.to_vec(),
+            });
+        }
     }
 
     // Pack into stored zip with Apple StreamingZip Unix metadata

@@ -61,18 +61,19 @@ where
         let _ = tx.send(SyncEvent::Done(res));
     });
 
+    let total_timeout_secs = 60.max(assets.len() as u64 * 2);
     let start = std::time::Instant::now();
     loop {
         let elapsed = start.elapsed();
-        if elapsed >= Duration::from_secs(35) {
-            bail!("AirTraffic sync timed out (35s). 1) Разблокируйте экран iPhone и держите включенным. 2) Откройте приложение «Книги» (Apple Books) на iPhone один раз. 3) Закройте iTunes на ПК.");
+        if elapsed >= Duration::from_secs(total_timeout_secs) {
+            bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.", total_timeout_secs);
         }
-        let timeout = Duration::from_secs(35) - elapsed;
+        let timeout = Duration::from_secs(total_timeout_secs) - elapsed;
         match rx.recv_timeout(timeout) {
             Ok(SyncEvent::Log(msg)) => log(&msg),
             Ok(SyncEvent::Done(res)) => return res,
             Err(_) => {
-                bail!("AirTraffic sync timed out (35s). 1) Разблокируйте экран iPhone и держите включенным. 2) Откройте приложение «Книги» (Apple Books) на iPhone один раз. 3) Закройте iTunes на ПК.");
+                bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.", total_timeout_secs);
             }
         }
     }
@@ -263,7 +264,11 @@ where
             }
 
             if idx + 1 < assets.len() {
-                sleep(Duration::from_millis(900));
+                if idx == 0 {
+                    sleep(Duration::from_millis(400));
+                } else {
+                    sleep(Duration::from_millis(60));
+                }
             }
         }
 
