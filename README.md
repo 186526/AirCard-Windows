@@ -97,6 +97,8 @@ The compiled binary will be in `target\release\aircard.exe`.
 ## Contributors
 - **[@Lumid-Off](https://github.com/Lumid-Off)** (Windows Native Rust Port & Maintainer) — [GitHub](https://github.com/Lumid-Off) · [Twitter / X](https://x.com/LumidOff)
 - **[@mak5er](https://github.com/mak5er)** (Original macOS App) — [GitHub](https://github.com/mak5er) · [Twitter / X](https://x.com/mak5er)
+- **[AirLift](https://github.com/0xjohnnydev/airlift)** by **[0xjohnny (@0xjohnnydev)](https://github.com/0xjohnnydev)**: Original AirTraffic/ATAirlock sandbox escape and proof of concept underlying `AirliftFFI`.
+- Built upon concepts from the **AirCard** project.
 
 ## Credits
 - Core exploit based on `airlift` (AirTraffic sync escape).
