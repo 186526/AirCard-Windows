@@ -3,14 +3,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::afc::AfcClient;
 use crate::airlift::{
     LINK_PREFIX, RECOVERED_PREFIX, SOURCE_PREFIX, build_books_plist,
     build_streaming_zip_archive, build_streaming_zip_archive_multi, restore_books, snapshot_books,
     stage_streaming_zip,
 };
 use crate::airtraffic::sync_assets_via_airtraffic;
-use crate::device::{ActiveDeviceSession, ConnectionMode};
+use crate::device::{ConnectionMode, open_active_session};
 
 #[allow(dead_code)]
 pub const TARGET_WALLET_ASSETS: &[&str] = &[
@@ -26,26 +25,9 @@ pub const CACHE_FILES: &[&str] = &[
     "Preview",
 ];
 
-#[link(name = "bcrypt")]
-unsafe extern "system" {
-    fn BCryptGenRandom(
-        hAlgorithm: *mut std::ffi::c_void,
-        pbBuffer: *mut u8,
-        cbBuffer: u32,
-        dwFlags: u32,
-    ) -> i32;
-}
-
 pub fn generate_token() -> String {
     let mut bytes = [0u8; 10];
-    unsafe {
-        let _ = BCryptGenRandom(
-            std::ptr::null_mut(),
-            bytes.as_mut_ptr(),
-            bytes.len() as u32,
-            2, // BCRYPT_USE_SYSTEM_PREFERRED_RNG
-        );
-    }
+    let _ = crate::backend::random_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
@@ -76,12 +58,12 @@ where
     ];
 
     log(&format!("Connecting AFC for {}...", leaf_name));
-    let session = ActiveDeviceSession::open(Some(udid), connection_mode)
+    let session = open_active_session(Some(udid), connection_mode)
         .context("Failed to open device session for writing")?;
-    log(&format!("Connected over {}.", session.transport.label()));
-    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
+    log(&format!("Connected over {}.", session.transport().label()));
+    let afc = session.open_afc().context("Failed to open AFC connection")?;
 
-    let snapshot = snapshot_books(&afc).context("Failed to snapshot Books state before staging")?;
+    let snapshot = snapshot_books(afc.as_ref()).context("Failed to snapshot Books state before staging")?;
 
     let archive_data = build_streaming_zip_archive(target_dir, payload)
         .context("Failed to build streaming zip archive")?;
@@ -91,7 +73,7 @@ where
 
     let write_res = (|| -> Result<()> {
         log(&format!("Staging payload archive ({} bytes) via MobileInstallation...", archive_data.len()));
-        stage_streaming_zip(&session, &source, &archive_data)
+        stage_streaming_zip(&*session, &source, &archive_data)
             .context("Failed to stage streaming zip conduit")?;
 
         let link_obj = format!("{}/p0/p1/p2/link", source);
@@ -107,7 +89,7 @@ where
         }
 
         log(&format!("Synchronizing {} with AirTraffic host daemon...", leaf_name));
-        sync_assets_via_airtraffic(udid, session.transport, &assets_to_sync, &mut log)
+        sync_assets_via_airtraffic(udid, session.transport(), &assets_to_sync, &mut log)
             .context("AirTraffic sync failed")?;
 
         Ok(())
@@ -118,7 +100,7 @@ where
     let _ = afc.remove_tree(&source);
     sleep(Duration::from_millis(800));
 
-    let restore_res = restore_books(&afc, &snapshot);
+    let restore_res = restore_books(afc.as_ref(), &snapshot);
 
     write_res?;
     restore_res.context("Failed to restore Books state during cleanup")?;
@@ -173,12 +155,12 @@ where
     }
 
     log(&format!("Connecting AFC for batch of {} assets...", items.len()));
-    let session = ActiveDeviceSession::open(Some(udid), connection_mode)
+    let session = open_active_session(Some(udid), connection_mode)
         .context("Failed to open device session for writing")?;
-    log(&format!("Connected over {}.", session.transport.label()));
-    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
+    log(&format!("Connected over {}.", session.transport().label()));
+    let afc = session.open_afc().context("Failed to open AFC connection")?;
 
-    let snapshot = snapshot_books(&afc).context("Failed to snapshot Books state before staging")?;
+    let snapshot = snapshot_books(afc.as_ref()).context("Failed to snapshot Books state before staging")?;
 
     let archive_data = build_streaming_zip_archive_multi(target_dir, items)
         .context("Failed to build multi-payload streaming zip archive")?;
@@ -188,7 +170,7 @@ where
 
     let write_res = (|| -> Result<()> {
         log(&format!("Staging multi-payload archive ({} bytes, {} files) via MobileInstallation...", archive_data.len(), items.len()));
-        stage_streaming_zip(&session, &source, &archive_data)
+        stage_streaming_zip(&*session, &source, &archive_data)
             .context("Failed to stage streaming zip conduit")?;
 
         let link_obj = format!("{}/p0/p1/p2/link", source);
@@ -206,7 +188,7 @@ where
 
         log(&format!("Synchronizing batch ({} items) with AirTraffic host daemon in single session...", items.len()));
         let assets_refs: Vec<(&str, &str)> = assets_to_sync.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-        sync_assets_via_airtraffic(udid, session.transport, &assets_refs, &mut log)
+        sync_assets_via_airtraffic(udid, session.transport(), &assets_refs, &mut log)
             .context("AirTraffic batch sync failed")?;
 
         Ok(())
@@ -217,7 +199,7 @@ where
     let _ = afc.remove_tree(&source);
     sleep(Duration::from_millis(800));
 
-    let restore_res = restore_books(&afc, &snapshot);
+    let restore_res = restore_books(afc.as_ref(), &snapshot);
 
     write_res?;
     restore_res.context("Failed to restore Books state during cleanup")?;
@@ -374,4 +356,17 @@ where
     progress(total_dirs, total_dirs, "Passcode theme applied successfully!");
     log("Passcode theme successfully written! Lock or reboot iPhone to see new keypad.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_token_is_hex() {
+        let token = generate_token();
+        assert_eq!(token.len(), 20);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(token, generate_token());
+    }
 }

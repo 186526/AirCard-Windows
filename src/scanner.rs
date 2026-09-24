@@ -7,17 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use regex::Regex;
 
-use crate::device::{ActiveDeviceSession, ConnectionMode};
+use std::time::Duration;
 
-#[cfg(windows)]
-unsafe extern "system" {
-    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
-}
-
-#[cfg(windows)]
-const SOL_SOCKET: i32 = 0xffff;
-#[cfg(windows)]
-const SO_RCVTIMEO: i32 = 0x1006;
+use crate::backend::Received;
+use crate::device::{ConnectionMode, open_active_session};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SavedCard {
@@ -25,10 +18,28 @@ pub struct SavedCard {
     pub name: String,
 }
 
+#[cfg(windows)]
 pub fn get_cards_storage_path() -> PathBuf {
     let local_app_data = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".to_string());
     let dir = PathBuf::from(local_app_data).join("AirCard");
+    let _ = fs::create_dir_all(&dir);
+    dir.join("cards.json")
+}
+
+#[cfg(unix)]
+pub fn get_cards_storage_path() -> PathBuf {
+    let data_home = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".local/share"));
+    let dir = data_home.join("aircard");
     let _ = fs::create_dir_all(&dir);
     dir.join("cards.json")
 }
@@ -259,36 +270,17 @@ where
     L: FnMut(String),
 {
     log("Connecting to device session for syslog monitoring...".to_string());
-    let session = ActiveDeviceSession::open(udid, connection_mode)
+    let session = open_active_session(udid, connection_mode)
         .context("Failed to connect to device for syslog scanning")?;
     log(format!(
         "Connected to {} over {}.",
-        session.udid,
-        session.transport.label()
+        session.udid(),
+        session.transport().label()
     ));
-    let libs = &session.libs;
     log("Starting com.apple.syslog_relay service on device...".to_string());
-    let service_conn = session.start_service("com.apple.syslog_relay")
+    let service_conn = session
+        .start_service("com.apple.syslog_relay")
         .context("Failed to start com.apple.syslog_relay service")?;
-
-    let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(service_conn) };
-    if raw_socket <= 0 {
-        unsafe { (libs.amd_service_connection_invalidate)(service_conn) };
-        anyhow::bail!("Invalid syslog socket");
-    }
-
-    // Set socket receive timeout
-    #[cfg(windows)]
-    unsafe {
-        let timeout_ms: u32 = 500;
-        setsockopt(
-            raw_socket as usize,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &timeout_ms as *const u32 as *const i8,
-            std::mem::size_of::<u32>() as i32,
-        );
-    }
 
     log("Syslog relay established. Listening for Wallet & PassKit events...".to_string());
     log("Tip: Open Apple Wallet on your iPhone or tap your card to trigger events.".to_string());
@@ -297,48 +289,52 @@ where
     let mut line_acc = Vec::with_capacity(1024);
 
     while !stop_flag.load(Ordering::Relaxed) {
-        let bytes_read = unsafe {
-            (libs.amd_service_connection_receive)(
-                service_conn,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-            )
+        let read = service_conn.receive(&mut buffer, Duration::from_millis(500));
+
+        let bytes_read = match read {
+            Ok(Received::Data { len }) => len,
+            Ok(Received::Closed) => {
+                log("Syslog socket closed by device.".to_string());
+                break;
+            }
+            // Timeout or transient failure: sleep briefly to avoid pegging CPU
+            Ok(Received::Idle) => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(err) => {
+                log(format!("Syslog receive failed: {err:#}"));
+                break;
+            }
         };
 
-        if bytes_read > 0 {
-            let slice = &buffer[..bytes_read as usize];
-            for &b in slice {
-                if b == b'\n' || b == b'\0' {
-                    if !line_acc.is_empty() {
-                        let line = String::from_utf8_lossy(&line_acc);
-                        if let Some(hash) = extract_card_hash_from_line(&line) {
-                            let name = extract_card_name_from_line(&line).unwrap_or_default();
-                            log(format!(
-                                "Found card pass! Name: '{}', Hash: {}",
-                                if name.is_empty() { "Unknown" } else { &name },
-                                hash
-                            ));
-                            add_or_update_card(&hash, &name);
-                            on_card_found(hash, name);
-                        }
-                        line_acc.clear();
+        if bytes_read == 0 {
+            continue;
+        }
+
+        let slice = &buffer[..bytes_read];
+        for &b in slice {
+            if b == b'\n' || b == b'\0' {
+                if !line_acc.is_empty() {
+                    let line = String::from_utf8_lossy(&line_acc);
+                    if let Some(hash) = extract_card_hash_from_line(&line) {
+                        let name = extract_card_name_from_line(&line).unwrap_or_default();
+                        log(format!(
+                            "Found card pass! Name: '{}', Hash: {}",
+                            if name.is_empty() { "Unknown" } else { &name },
+                            hash
+                        ));
+                        add_or_update_card(&hash, &name);
+                        on_card_found(hash, name);
                     }
-                } else if b != b'\r' {
-                    line_acc.push(b);
+                    line_acc.clear();
                 }
+            } else if b != b'\r' {
+                line_acc.push(b);
             }
-        } else if bytes_read == 0 {
-            log("Syslog socket closed by device.".to_string());
-            break; // Socket closed
-        } else {
-            // Timeout or transient: sleep briefly to avoid pegging CPU
-            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
-    unsafe {
-        (libs.amd_service_connection_invalidate)(service_conn);
-    }
     log("Syslog scan stopped.".to_string());
 
     Ok(())
@@ -417,30 +413,25 @@ mod tests {
 
     #[test]
     fn test_syslog_service_receive() {
-        let session = match ActiveDeviceSession::open(None, ConnectionMode::Auto) {
+        let session = match open_active_session(None, ConnectionMode::Auto) {
             Ok(s) => s,
             Err(e) => {
                 println!("No device connected: {:?}", e);
                 return;
             }
         };
-        let libs = &session.libs;
-        let conn = session.start_service("com.apple.syslog_relay").expect("start syslog_relay");
-        let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(conn) };
-        unsafe {
-            let timeout_ms: u32 = 500;
-            setsockopt(
-                raw_socket as usize,
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                &timeout_ms as *const u32 as *const i8,
-                std::mem::size_of::<u32>() as i32,
-            );
-        }
+        let conn = session
+            .start_service("com.apple.syslog_relay")
+            .expect("start syslog_relay");
         let mut buf = [0u8; 4096];
         let start = std::time::Instant::now();
-        let n = unsafe { (libs.amd_service_connection_receive)(conn, buf.as_mut_ptr(), buf.len()) };
-        println!("AMDServiceConnectionReceive returned: {} in {:?}", n, start.elapsed());
-        unsafe { (libs.amd_service_connection_invalidate)(conn) };
+        match conn.receive(&mut buf, Duration::from_millis(500)) {
+            Ok(Received::Data { len }) => {
+                println!("Syslog receive returned {} bytes in {:?}", len, start.elapsed())
+            }
+            Ok(Received::Idle) => println!("Syslog receive timed out in {:?}", start.elapsed()),
+            Ok(Received::Closed) => println!("Syslog connection closed in {:?}", start.elapsed()),
+            Err(err) => println!("Syslog receive failed: {err:#}"),
+        }
     }
 }

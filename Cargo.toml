@@ -2,7 +2,7 @@
 name = "aircard"
 version = "1.2.2"
 edition = "2024"
-description = "Native Windows AirCard client"
+description = "Native AirCard client for Windows and Linux"
 license = "MIT"
 
 [dependencies]
@@ -19,6 +19,9 @@ rfd = "0.17"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = true

@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 #[test]
 fn test_hex_token() {
     let mut bytes = [0u8; 10];

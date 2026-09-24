@@ -6,7 +6,7 @@ use std::thread;
 
 use eframe::egui;
 
-use crate::apple;
+use crate::backend as device_backend;
 use crate::device::{ConnectionMode, DeviceInfo, DeviceTransport, list_connected_devices};
 use crate::flasher::{flash_passcode_theme, flash_wallet_skin};
 use crate::image_skin::PreparedSkin;
@@ -54,9 +54,36 @@ fn current_timestamp() -> String {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn current_timestamp() -> String {
-    "00:00:00.000".to_string()
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = elapsed.as_secs() as libc::time_t;
+    let millis = elapsed.subsec_millis();
+
+    let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let tm = unsafe {
+        if libc::localtime_r(&seconds, local.as_mut_ptr()).is_null() {
+            return "00:00:00.000".to_string();
+        }
+        local.assume_init()
+    };
+
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        tm.tm_hour, tm.tm_min, tm.tm_sec, millis
+    )
+}
+
+/// The first bullet of the Help tab's prerequisites list. The host runtime a
+/// user has to install differs per platform, so the wording follows the target.
+fn prerequisites_line() -> &'static str {
+    if cfg!(windows) {
+        "- 64-bit iTunes or Apple Mobile Device Support installed"
+    } else {
+        "- libimobiledevice, libplist and libusbmuxd installed, usbmuxd running"
+    }
 }
 
 pub struct AirCardApp {
@@ -102,7 +129,7 @@ impl AirCardApp {
         setup_custom_fonts(&cc.egui_ctx);
         setup_custom_theme(&cc.egui_ctx);
 
-        let (apple_ready, apple_status) = match apple::verify_support() {
+        let (apple_ready, apple_status) = match device_backend::verify_support() {
             Ok(msg) => (true, msg),
             Err(err) => (false, err.to_string()),
         };
@@ -141,8 +168,24 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.2.1 initialized");
-        app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
+        app.add_log(format!(
+            "AirCard {} v{} initialized",
+            if cfg!(windows) { "Windows" } else { "Linux" },
+            env!("CARGO_PKG_VERSION")
+        ));
+        app.add_log(format!(
+            "{}: {}",
+            if cfg!(windows) {
+                "Apple Support Runtime"
+            } else {
+                "libimobiledevice Runtime"
+            },
+            match (app.apple_ready, cfg!(windows)) {
+                (true, _) => "Loaded and operational",
+                (false, true) => "Not found (iTunes required)",
+                (false, false) => "Not found (install the libimobiledevice libraries)",
+            }
+        ));
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
         if app.apple_ready {
@@ -786,7 +829,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.2.2")
+                        egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
@@ -1398,7 +1441,7 @@ impl AirCardApp {
 
                 ui.label(egui::RichText::new("Prerequisites").strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("- 64-bit iTunes or Apple Mobile Device Support installed").size(11.5).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(prerequisites_line()).size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("- First-time setup: connect by USB and tap \"Trust this Computer\"").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("- WiFi: enable WiFi sync, then use the same local network").size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new("- Select Auto, USB only, or WiFi only in the top bar").size(11.5).color(md3::ON_SURFACE_VARIANT));

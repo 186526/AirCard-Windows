@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-use std::ptr;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::afc::AfcClient;
-use crate::apple::{CFTypeRef, get_apple_libraries};
-use crate::device::ActiveDeviceSession;
+use crate::backend::{Afc, DeviceSession};
 
 pub const SOURCE_PREFIX: &str = "airlift-src-";
 pub const LINK_PREFIX: &str = "airlift-link-";
@@ -238,7 +236,7 @@ pub struct BooksSnapshot {
     pub files: HashMap<String, Option<Vec<u8>>>,
 }
 
-pub fn snapshot_books(afc: &AfcClient) -> Result<BooksSnapshot> {
+pub fn snapshot_books(afc: &dyn Afc) -> Result<BooksSnapshot> {
     let mut files = HashMap::new();
     for &path in TRACKED_BOOKS_FILES {
         if afc.exists(path) {
@@ -251,7 +249,7 @@ pub fn snapshot_books(afc: &AfcClient) -> Result<BooksSnapshot> {
     Ok(BooksSnapshot { files })
 }
 
-pub fn restore_books(afc: &AfcClient, snapshot: &BooksSnapshot) -> Result<()> {
+pub fn restore_books(afc: &dyn Afc, snapshot: &BooksSnapshot) -> Result<()> {
     let mut errors = Vec::new();
     for (path, data_opt) in &snapshot.files {
         match data_opt {
@@ -280,91 +278,36 @@ pub fn restore_books(afc: &AfcClient, snapshot: &BooksSnapshot) -> Result<()> {
 }
 
 pub fn stage_streaming_zip(
-    session: &ActiveDeviceSession,
+    session: &dyn DeviceSession,
     source_subdir: &str,
     archive: &[u8],
 ) -> Result<()> {
-    let libs = get_apple_libraries()?;
     let zip_service = session.start_service("com.apple.streaming_zip_conduit")?;
 
-    let send_res = (|| -> Result<()> {
-        let mut msg_dict = HashMap::new();
-        msg_dict.insert("MediaSubdir".to_string(), plist::Value::String(source_subdir.to_string()));
-        let mut msg_plist = Vec::new();
-        plist::to_writer_binary(&mut msg_plist, &plist::Value::Dictionary(msg_dict.into_iter().collect()))?;
+    let mut message = HashMap::new();
+    message.insert(
+        "MediaSubdir".to_string(),
+        plist::Value::String(source_subdir.to_string()),
+    );
+    zip_service.send_plist_message(&plist::Value::Dictionary(message.into_iter().collect()))?;
 
-        let cf_msg = libs.create_cf_plist_from_bytes(&msg_plist)?;
-        let status = unsafe {
-            (libs.amd_service_connection_send_message)(
-                zip_service,
-                cf_msg.raw,
-                crate::apple::K_CFPROPERTY_LIST_BINARY_FORMAT_V1_0,
-            )
-        };
-        if status != 0 {
-            bail!("AMDServiceConnectionSendMessage failed with code {}", status);
-        }
+    zip_service.send_all(archive)?;
 
-        // Send streaming zip payload
-        let mut sent = 0;
-        while sent < archive.len() {
-            let chunk_size = std::cmp::min(65536, archive.len() - sent);
-            let s = unsafe {
-                (libs.amd_service_connection_send)(
-                    zip_service,
-                    archive.as_ptr().add(sent),
-                    chunk_size,
-                )
-            };
-            if s <= 0 {
-                bail!("AMDServiceConnectionSend failed during archive transmission");
-            }
-            sent += s as usize;
-        }
+    let response = zip_service
+        .receive_plist_message(Duration::from_secs(25))
+        .context("The streaming zip conduit returned no response")?
+        .context("The streaming zip conduit closed without answering")?;
 
-        // Set receive timeout so socket cannot block indefinitely
-        let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(zip_service) };
-        if raw_socket > 0 {
-            #[cfg(windows)]
-            unsafe {
-                unsafe extern "system" {
-                    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
-                }
-                const SOL_SOCKET: i32 = 0xffff;
-                const SO_RCVTIMEO: i32 = 0x1006;
-                let timeout_ms: u32 = 25000;
-                let _ = setsockopt(
-                    raw_socket as usize,
-                    SOL_SOCKET,
-                    SO_RCVTIMEO,
-                    &timeout_ms as *const u32 as *const i8,
-                    std::mem::size_of::<u32>() as i32,
-                );
-            }
-        }
-
-        // Receive response
-        let mut response: CFTypeRef = ptr::null();
-        let mut format: isize = 0;
-        let recv_status = unsafe {
-            (libs.amd_service_connection_receive_message)(zip_service, &mut response, &mut format)
-        };
-        if !response.is_null() {
-            unsafe { (libs.cf_release)(response) };
-        }
-
-        if recv_status != 0 {
-            bail!("StreamingZip conduit returned error code {}", recv_status);
-        }
-
-        Ok(())
-    })();
-
-    unsafe {
-        (libs.amd_service_connection_invalidate)(zip_service);
+    let status = response
+        .as_dictionary()
+        .and_then(|dict| dict.get("Status"))
+        .and_then(|value| value.as_string())
+        .context("The streaming zip response carried no Status")?;
+    if status != "DataComplete" {
+        bail!("The streaming zip conduit reported status '{}'", status);
     }
 
-    send_res
+    Ok(())
 }
 
 #[cfg(test)]
