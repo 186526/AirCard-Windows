@@ -25,12 +25,11 @@
 
 **Linux**
 - A 64-bit distro with a desktop session (X11 or Wayland) for the `egui` window.
-- The public libimobiledevice stack plus the `usbmuxd` daemon. Package names vary by release:
-  - Debian / Ubuntu: `sudo apt install usbmuxd libimobiledevice-1.0-6 libplist-2.0-4 libusbmuxd-2.0-7`
-    (on older releases the plist/usbmuxd packages are named `libplist3` / `libusbmuxd6`)
+- The public libimobiledevice stack plus the `usbmuxd` daemon:
+  - Debian / Ubuntu: `sudo apt install usbmuxd libimobiledevice6 libusbmuxd6 libplist-2.0-4`. The binary package names carry the soname major, so Debian 13 and newer spell them `libimobiledevice-1.0-6`, `libusbmuxd-2.0-7` and `libplist-2.0-4`, and Ubuntu 22.04 uses `libplist3`.
   - Fedora: `sudo dnf install usbmuxd libimobiledevice libplist libusbmuxd`
   - Arch: `sudo pacman -S usbmuxd libimobiledevice libplist libusbmuxd`
-- The runtime libraries are loaded by soname (`libimobiledevice-1.0.so.6`, `libplist-2.0.so.4`, `libusbmuxd-2.0.so.7`), so no `-dev` package is needed to build or run. Make sure `usbmuxd` is running (`systemctl status usbmuxd`) before launching AirCard.
+- The runtime libraries are loaded by soname, so no `-dev` package is needed to build or run. AirCard accepts `libimobiledevice-1.0.so.6`, `libplist-2.0.so.4` or `.so.3`, and `libusbmuxd-2.0.so.7` or `.so.6`, plus the unversioned name a `-dev` install provides. Make sure `usbmuxd` is running (`systemctl status usbmuxd`) before launching AirCard.
 
 **Both platforms**
 - A Lightning or USB-C cable for the initial trust/pairing setup.
@@ -68,7 +67,8 @@
 
 ### Linux from a checkout
 ```bash
-sudo apt install usbmuxd libimobiledevice-1.0-6 libplist-2.0-4 libusbmuxd-2.0-7
+# Ubuntu 24.04; Debian 13 and newer renamed these packages (see Requirements)
+sudo apt install usbmuxd libimobiledevice6 libusbmuxd6 libplist-2.0-4
 cargo build --release
 ./target/release/aircard
 ```

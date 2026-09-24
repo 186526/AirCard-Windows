@@ -15,7 +15,7 @@ cargo build           # debug build
 cargo build --release # target/release/aircard[.exe]
 ```
 
-Neither build links against the support stack: the Windows build loads Apple's DLLs and the Linux build loads libimobiledevice / libplist / libusbmuxd, both at run time through `libloading`, so `cargo build` succeeds on a machine with no iPhone and no support packages installed. On Linux the three runtime libraries must be present by soname (`libimobiledevice-1.0.so.6`, `libplist-2.0.so.4`, `libusbmuxd-2.0.so.7`) and `usbmuxd` must be running; no `-dev` package is needed.
+Neither build links against the support stack: the Windows build loads Apple's DLLs and the Linux build loads libimobiledevice / libplist / libusbmuxd, both at run time through `libloading`, so `cargo build` succeeds on a machine with no iPhone and no support packages installed. On Linux `usbmuxd` must be running and the three runtime libraries must be present; `src/backend/linux/ffi.rs` holds the soname candidates it tries (`libimobiledevice-1.0.so.6`; `libplist-2.0.so.4` then `.so.3`; `libusbmuxd-2.0.so.7` then `.so.6`; then the unversioned name), so no `-dev` package is needed.
 
 The release profile in `Cargo.toml` sets `lto = true`, `codegen-units = 1`, `strip = "symbols"`. `src/main.rs` sets `windows_subsystem = "windows"` outside debug builds, so Windows release builds have no console.
 

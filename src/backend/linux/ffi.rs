@@ -56,9 +56,22 @@ pub const IDEVICE_E_NOT_ENOUGH_DATA: c_int = -4;
 /// `IDEVICE_E_TIMEOUT` from `libimobiledevice.h`.
 pub const IDEVICE_E_TIMEOUT: c_int = -7;
 
+/// Sonames to try, in order. Debian 13 and newer ship the `libplist-2.0.so.4`
+/// and `libusbmuxd-2.0.so.7` majors, Ubuntu 24.04 ships `.so.4` with
+/// `libusbmuxd-2.0.so.6`, and Debian 12 and Ubuntu 22.04 ship
+/// `libplist-2.0.so.3`. A `-dev` installation always provides the unversioned
+/// name as well.
 const DEVICE_LIBRARY_NAMES: &[&str] = &["libimobiledevice-1.0.so.6", "libimobiledevice-1.0.so"];
-const PLIST_LIBRARY_NAMES: &[&str] = &["libplist-2.0.so.4", "libplist-2.0.so"];
-const USBMUXD_LIBRARY_NAMES: &[&str] = &["libusbmuxd-2.0.so.7", "libusbmuxd-2.0.so"];
+const PLIST_LIBRARY_NAMES: &[&str] = &[
+    "libplist-2.0.so.4",
+    "libplist-2.0.so.3",
+    "libplist-2.0.so",
+];
+const USBMUXD_LIBRARY_NAMES: &[&str] = &[
+    "libusbmuxd-2.0.so.7",
+    "libusbmuxd-2.0.so.6",
+    "libusbmuxd-2.0.so",
+];
 
 /// Every symbol AirCard uses, resolved once for the whole process.
 #[allow(dead_code)]
@@ -153,7 +166,7 @@ pub fn libraries() -> Result<Arc<Libraries>> {
 
 fn load_libraries() -> Result<Libraries> {
     let (device_library, source) = open_first(DEVICE_LIBRARY_NAMES)
-        .context("libimobiledevice was not found. Install it (Debian/Ubuntu: libimobiledevice-1.0-6, Fedora: libimobiledevice) to talk to an iPhone.")?;
+        .context("libimobiledevice was not found. Install it (Debian 13 and newer: libimobiledevice-1.0-6, Ubuntu 24.04: libimobiledevice6, Fedora: libimobiledevice) to talk to an iPhone.")?;
     let (plist_library, _) = open_first(PLIST_LIBRARY_NAMES)
         .context("libplist was not found. Install libimobiledevice and its libplist dependency.")?;
     let (usbmuxd_library, _) = open_first(USBMUXD_LIBRARY_NAMES)

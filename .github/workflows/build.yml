@@ -66,11 +66,13 @@ jobs:
 
       - name: Install libimobiledevice runtime
         # Only the shared libraries are needed: the build never links them and
-        # the tests load them through dlopen.
+        # the tests load them through dlopen, so no -dev package is installed.
+        # These are the Ubuntu 24.04 names; Debian 13 and newer spell them
+        # libimobiledevice-1.0-6 and libusbmuxd-2.0-7.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libimobiledevice-1.0-6 libplist-2.0-4 libusbmuxd-2.0-7 \
+            libimobiledevice6 libplist-2.0-4 libusbmuxd6 \
             libegl1 libgl1 libxkbcommon0 libwayland-client0
 
       - name: Run tests
